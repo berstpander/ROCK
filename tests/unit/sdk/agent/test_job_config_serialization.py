@@ -3,7 +3,7 @@ from pathlib import Path
 import yaml
 
 from rock.sdk.bench.models.job.config import (
-    JobConfig,
+    HarborJobConfig,
     LocalDatasetConfig,
     RegistryDatasetConfig,
     RemoteRegistryInfo,
@@ -100,9 +100,9 @@ class TestToHarborEnvironment:
         assert "setup_commands" not in result
 
 
-class TestJobConfigToHarborYaml:
+class TestHarborJobConfigToHarborYaml:
     def test_basic_serialization(self):
-        cfg = JobConfig(
+        cfg = HarborJobConfig(
             job_name="test-job",
             experiment_id="test-exp",
             n_attempts=2,
@@ -111,14 +111,15 @@ class TestJobConfigToHarborYaml:
         yaml_str = cfg.to_harbor_yaml()
         data = yaml.safe_load(yaml_str)
 
-        # Base fields (job_name, experiment_id, etc.) are excluded from harbor YAML
-        assert "job_name" not in data
+        # job_name is re-injected so harbor uses it as the directory name
+        assert data["job_name"] == "test-job"
+        # Other base fields (experiment_id, etc.) are excluded from harbor YAML
         assert "experiment_id" not in data
         assert data["n_attempts"] == 2
         assert data["agents"][0]["name"] == "terminus-2"
 
     def test_excludes_rock_fields(self):
-        cfg = JobConfig(
+        cfg = HarborJobConfig(
             experiment_id="test-exp",
             environment=RockEnvironmentConfig(
                 setup_commands=["pip install harbor"],
@@ -144,7 +145,7 @@ class TestJobConfigToHarborYaml:
         assert "environment" not in data or "setup_commands" not in data.get("environment", {})
 
     def test_excludes_none_values(self):
-        cfg = JobConfig(
+        cfg = HarborJobConfig(
             job_name="test",
             experiment_id="test-exp",
             agents=[AgentConfig(name="t2")],
@@ -155,8 +156,8 @@ class TestJobConfigToHarborYaml:
         assert "agent_timeout_multiplier" not in data
 
     def test_labels_excluded_as_base_field(self):
-        """labels is a base JobConfig field, so it's excluded from harbor YAML."""
-        cfg = JobConfig(
+        """labels is a base HarborJobConfig field, so it's excluded from harbor YAML."""
+        cfg = HarborJobConfig(
             job_name="labeled-job",
             experiment_id="test-exp",
             labels={"step": "42", "env": "prod"},
@@ -165,10 +166,10 @@ class TestJobConfigToHarborYaml:
         data = yaml.safe_load(yaml_str)
 
         assert "labels" not in data
-        assert "job_name" not in data
+        assert data["job_name"] == "labeled-job"
 
     def test_path_fields_serialized_as_strings(self):
-        cfg = JobConfig(
+        cfg = HarborJobConfig(
             experiment_id="test-exp",
             jobs_dir=Path("/workspace/jobs"),
             tasks=[TaskConfig(path="/workspace/tasks/t1")],
@@ -180,7 +181,7 @@ class TestJobConfigToHarborYaml:
         assert data["tasks"][0]["path"] == "/workspace/tasks/t1"
 
     def test_harbor_env_fields_serialized(self):
-        cfg = JobConfig(
+        cfg = HarborJobConfig(
             job_name="full-test",
             experiment_id="test-exp",
             n_attempts=3,
@@ -206,7 +207,7 @@ class TestJobConfigToHarborYaml:
         yaml_str = cfg.to_harbor_yaml()
         data = yaml.safe_load(yaml_str)
 
-        assert "job_name" not in data  # base field excluded
+        assert data["job_name"] == "full-test"
         assert data["environment"]["type"] == "docker"
         assert data["environment"]["force_build"] is True
         assert data["environment"]["override_cpus"] == 4
@@ -217,7 +218,9 @@ class TestJobConfigToHarborYaml:
 
     def test_env_in_harbor_yaml(self):
         """env is passed to both sandbox session and harbor YAML."""
-        cfg = JobConfig(experiment_id="test-exp", environment=RockEnvironmentConfig(env={"OPENAI_API_KEY": "sk-xxx"}))
+        cfg = HarborJobConfig(
+            experiment_id="test-exp", environment=RockEnvironmentConfig(env={"OPENAI_API_KEY": "sk-xxx"})
+        )
         yaml_str = cfg.to_harbor_yaml()
         data = yaml.safe_load(yaml_str)
 
@@ -225,7 +228,7 @@ class TestJobConfigToHarborYaml:
         assert data["environment"]["env"] == {"OPENAI_API_KEY": "sk-xxx"}
 
 
-class TestJobConfigFromYaml:
+class TestHarborJobConfigFromYaml:
     def test_from_yaml_basic(self, tmp_path):
         yaml_content = """
 job_name: loaded-job
@@ -243,7 +246,7 @@ datasets:
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text(yaml_content)
 
-        cfg = JobConfig.from_yaml(str(yaml_file))
+        cfg = HarborJobConfig.from_yaml(str(yaml_file))
         assert cfg.job_name == "loaded-job"
         assert cfg.n_attempts == 2
         assert cfg.agents[0].name == "terminus-2"
@@ -268,7 +271,7 @@ agents:
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text(yaml_content)
 
-        cfg = JobConfig.from_yaml(str(yaml_file))
+        cfg = HarborJobConfig.from_yaml(str(yaml_file))
         assert cfg.environment.image == "my-image:latest"
         assert cfg.environment.memory == "32g"
         assert cfg.environment.env == {"OPENAI_API_KEY": "sk-xxx"}
@@ -288,7 +291,7 @@ datasets:
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text(yaml_content)
 
-        cfg = JobConfig.from_yaml(str(yaml_file))
+        cfg = HarborJobConfig.from_yaml(str(yaml_file))
         assert cfg.job_name == "local-dataset-job"
         assert isinstance(cfg.datasets[0], LocalDatasetConfig)
         assert cfg.datasets[0].path == Path("/data/tasks")
@@ -306,5 +309,5 @@ agents:
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text(yaml_content)
 
-        cfg = JobConfig.from_yaml(str(yaml_file))
+        cfg = HarborJobConfig.from_yaml(str(yaml_file))
         assert cfg.labels == {"step": "42", "env": "prod"}

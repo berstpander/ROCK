@@ -23,6 +23,33 @@ class AbstractTrial(ABC):
     def __init__(self, config: JobConfig):
         self._config = config
 
+    async def on_sandbox_ready(self, sandbox: Sandbox) -> None:
+        """G4 hook: called by JobExecutor once sandbox.start() succeeds, before setup().
+
+        Default behavior backfills ``namespace`` and ``experiment_id`` from the
+        sandbox into ``self._config`` (both are fields on ``JobConfig``), and
+        raises ``ValueError`` if the sandbox reports a value that conflicts
+        with one already set on the config. Matches legacy
+        ``_autofill_sandbox_info``. Subclasses can override to extend.
+        """
+        sb_ns = getattr(sandbox, "_namespace", None)
+        if sb_ns is not None:
+            if self._config.namespace is not None and self._config.namespace != sb_ns:
+                raise ValueError(
+                    f"namespace mismatch: {type(self._config).__name__} has "
+                    f"'{self._config.namespace}', but sandbox returned '{sb_ns}'"
+                )
+            self._config.namespace = sb_ns
+
+        sb_exp = getattr(sandbox, "_experiment_id", None)
+        if sb_exp is not None:
+            if self._config.experiment_id is not None and self._config.experiment_id != sb_exp:
+                raise ValueError(
+                    f"experiment_id mismatch: {type(self._config).__name__} has "
+                    f"'{self._config.experiment_id}', but sandbox returned '{sb_exp}'"
+                )
+            self._config.experiment_id = sb_exp
+
     @abstractmethod
     async def setup(self, sandbox: Sandbox) -> None:
         """Pre-execution: prepare sandbox environment (upload files, write configs)."""
@@ -32,8 +59,15 @@ class AbstractTrial(ABC):
         """Build: generate bash script to execute."""
 
     @abstractmethod
-    async def collect(self, sandbox: Sandbox, output: str, exit_code: int) -> TrialResult:
-        """Post-execution: collect and parse results."""
+    async def collect(self, sandbox: Sandbox, output: str, exit_code: int) -> TrialResult | list[TrialResult]:
+        """Post-execution: collect and parse results.
+
+        Return a single ``TrialResult`` for one-shot tasks (e.g. BashTrial),
+        or a ``list[TrialResult]`` when the underlying tool produces multiple
+        sub-results per sandbox invocation (e.g. HarborTrial running a dataset
+        over N tasks). The Job / JobExecutor layer flattens lists into the
+        final ``JobResult.trial_results``.
+        """
 
     async def _upload_files(self, sandbox: Sandbox) -> None:
         """Shared helper: upload all entries in ``config.file_uploads``."""
