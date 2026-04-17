@@ -654,6 +654,249 @@ class TestArun:
             mock_logger.error.assert_called()
 
 
+class TestAsyncArgument:
+    """Tests for --async argument definition."""
+
+    def _setup(self):
+        JobCommand._run_parser = None
+        top = argparse.ArgumentParser(prog="rock")
+        subparsers = top.add_subparsers(dest="command")
+        asyncio.run(JobCommand.add_parser_to(subparsers))
+        return top
+
+    def test_async_argument_exists(self):
+        """--async argument must be defined in the parser."""
+        self._setup()
+        actions = {a.dest for a in JobCommand._run_parser._actions}
+        # dest is "async_submit" to avoid Python keyword conflict
+        assert "async_submit" in actions
+
+    def test_async_default_is_false(self):
+        """--async should default to False."""
+        top = self._setup()
+        ns = top.parse_args(["job", "run", "--script", "run.sh"])
+        assert ns.async_submit is False
+
+    def test_async_flag_sets_true(self):
+        """Passing --async sets it to True."""
+        top = self._setup()
+        ns = top.parse_args(["job", "run", "--async", "--script", "run.sh"])
+        assert ns.async_submit is True
+
+    def test_async_with_yaml_mode(self):
+        """--async can be combined with --job_config."""
+        top = self._setup()
+        ns = top.parse_args(["job", "run", "--async", "--job_config", "job.yaml"])
+        assert ns.async_submit is True
+        assert ns.job_config == "job.yaml"
+
+
+class TestAsyncExecution:
+    """Tests for async mode execution behavior."""
+
+    def _setup(self):
+        JobCommand._run_parser = None
+        top = argparse.ArgumentParser(prog="rock")
+        subparsers = top.add_subparsers(dest="command")
+        asyncio.run(JobCommand.add_parser_to(subparsers))
+        return top
+
+    def test_async_calls_submit_not_run(self, monkeypatch):
+        """--async mode should call Job.submit(), not Job.run()."""
+        from unittest.mock import MagicMock
+
+        submit_called = {}
+        run_called = {}
+
+        class FakeJobClient:
+            trials = []
+
+        class FakeJob:
+            def __init__(self, cfg):
+                self._job_client = None
+
+            async def submit(self):
+                submit_called["called"] = True
+                self._job_client = FakeJobClient()
+                # Note: submit() returns None but sets _job_client
+
+            async def run(self):
+                run_called["called"] = True
+                result = MagicMock()
+                result.status = "COMPLETED"
+                result.trial_results = []
+                return result
+
+        # Patch Job where it's imported (lazy import in _job_run)
+        monkeypatch.setattr("rock.sdk.job.Job", FakeJob)
+
+        top = self._setup()
+        ns = top.parse_args(["job", "run", "--async", "--script", "run.sh"])
+        asyncio.run(JobCommand().arun(ns))
+
+        assert submit_called.get("called") is True
+        assert run_called.get("called") is not True
+
+    def test_sync_mode_still_calls_run(self, monkeypatch):
+        """Without --async, Job.run() should still be called."""
+        from unittest.mock import MagicMock
+
+        run_called = {}
+
+        class FakeJob:
+            def __init__(self, cfg):
+                pass
+
+            async def run(self):
+                run_called["called"] = True
+                result = MagicMock()
+                result.status = "COMPLETED"
+                result.trial_results = []
+                return result
+
+        monkeypatch.setattr("rock.sdk.job.Job", FakeJob)
+
+        top = self._setup()
+        ns = top.parse_args(["job", "run", "--script", "run.sh"])
+        asyncio.run(JobCommand().arun(ns))
+
+        assert run_called.get("called") is True
+
+
+class TestPrintAsyncResult:
+    """Tests for _print_async_result output format."""
+
+    def _setup(self):
+        JobCommand._run_parser = None
+        top = argparse.ArgumentParser(prog="rock")
+        subparsers = top.add_subparsers(dest="command")
+        asyncio.run(JobCommand.add_parser_to(subparsers))
+        return top
+
+    def test_output_single_trial(self, capsys):
+        """Single trial should produce correct table output."""
+        from rock.sdk.job.config import BashJobConfig
+        from rock.sdk.job.executor import JobClient, TrialClient
+        from rock.sdk.sandbox.client import Sandbox
+
+        # Mock sandbox - set _sandbox_id directly (internal attribute)
+        sandbox = Sandbox.__new__(Sandbox)
+        sandbox._sandbox_id = "abc123def456"
+
+        # Mock trial client
+        trial_client = TrialClient(
+            sandbox=sandbox,
+            session="rock-job-test-job",
+            pid=12345,
+            trial=None,
+        )
+
+        job_client = JobClient(trials=[trial_client])
+
+        config = BashJobConfig(
+            job_name="test-job",
+            experiment_id="exp-001",
+            namespace="test-ns",
+            labels={"env": "test"},
+        )
+
+        JobCommand()._print_async_result(config, job_client)
+        out = capsys.readouterr().out
+
+        assert "Job submitted: test-job (1 trial)" in out
+        assert "sandbox_id   session              pid" in out
+        assert "abc123def45" in out  # truncated to 12 chars
+        assert "rock-job-test-job" in out
+        assert "12345" in out
+        assert "Experiment: exp-001" in out
+        assert "Namespace: test-ns" in out
+        assert "Labels: env=test" in out
+
+    def test_output_multiple_trials(self, capsys):
+        """Multiple trials should produce multiple rows."""
+        from rock.sdk.job.config import BashJobConfig
+        from rock.sdk.job.executor import JobClient, TrialClient
+        from rock.sdk.sandbox.client import Sandbox
+
+        trials = []
+        for i, pid in enumerate([12340, 12341, 12342, 12343]):
+            sandbox = Sandbox.__new__(Sandbox)
+            sandbox._sandbox_id = f"id{i}abc123def"
+            trial_client = TrialClient(
+                sandbox=sandbox,
+                session="rock-job-multi",
+                pid=pid,
+                trial=None,
+            )
+            trials.append(trial_client)
+
+        job_client = JobClient(trials=trials)
+
+        config = BashJobConfig(job_name="multi-job")
+
+        JobCommand()._print_async_result(config, job_client)
+        out = capsys.readouterr().out
+
+        assert "Job submitted: multi-job (4 trials)" in out
+        assert "12340" in out
+        assert "12341" in out
+        assert "12342" in out
+        assert "12343" in out
+
+    def test_output_na_for_missing_values(self, capsys):
+        """N/A should be displayed for missing experiment_id, namespace, labels."""
+        from rock.sdk.job.config import BashJobConfig
+        from rock.sdk.job.executor import JobClient, TrialClient
+        from rock.sdk.sandbox.client import Sandbox
+
+        sandbox = Sandbox.__new__(Sandbox)
+        sandbox._sandbox_id = "test-id"
+        trial_client = TrialClient(
+            sandbox=sandbox,
+            session="rock-job-default",
+            pid=99999,
+            trial=None,
+        )
+        job_client = JobClient(trials=[trial_client])
+
+        config = BashJobConfig(job_name="minimal-job")
+
+        JobCommand()._print_async_result(config, job_client)
+        out = capsys.readouterr().out
+
+        assert "Experiment: N/A" in out
+        assert "Namespace: N/A" in out
+        assert "Labels: N/A" in out
+
+    def test_labels_comma_separated(self, capsys):
+        """Multiple labels should be comma-separated."""
+        from rock.sdk.job.config import BashJobConfig
+        from rock.sdk.job.executor import JobClient, TrialClient
+        from rock.sdk.sandbox.client import Sandbox
+
+        sandbox = Sandbox.__new__(Sandbox)
+        sandbox._sandbox_id = "test-id"
+        trial_client = TrialClient(
+            sandbox=sandbox,
+            session="rock-job-labels",
+            pid=99999,
+            trial=None,
+        )
+        job_client = JobClient(trials=[trial_client])
+
+        config = BashJobConfig(
+            job_name="labels-job",
+            labels={"env": "prod", "team": "backend", "version": "v1"},
+        )
+
+        JobCommand()._print_async_result(config, job_client)
+        out = capsys.readouterr().out
+
+        assert "Labels: env=prod" in out
+        assert "team=backend" in out
+        assert "version=v1" in out
+
+
 class TestHelpOutput:
     def test_help_output_mentions_both_modes(self, capsys):
         top = argparse.ArgumentParser(prog="rock")
@@ -669,3 +912,16 @@ class TestHelpOutput:
         assert "flags mode" in out
         assert "--job_config" in out
         assert "--script" in out
+
+    def test_help_output_mentions_async(self, capsys):
+        """--async should appear in help output."""
+        top = argparse.ArgumentParser(prog="rock")
+        subparsers = top.add_subparsers(dest="command")
+        asyncio.run(JobCommand.add_parser_to(subparsers))
+
+        with pytest.raises(SystemExit) as excinfo:
+            top.parse_args(["job", "run", "--help"])
+
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        assert "--async" in out

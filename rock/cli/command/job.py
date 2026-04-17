@@ -93,13 +93,22 @@ class JobCommand(Command):
 
         # ── 4. Run ────────────────────────────────────────────────────
         try:
-            result = await Job(config).run()
-            if result.trial_results:
-                for tr in result.trial_results:
-                    output = getattr(tr, "raw_output", None) or ""
-                    if output:
-                        print(output)
-            logger.info(f"Job completed: status={result.status}")
+            job = Job(config)
+            if args.async_submit:
+                # Async mode: submit + print info + exit
+                await job.submit()
+                job_client = job._job_client
+                self._print_async_result(config, job_client)
+                logger.info(f"Job submitted asynchronously: {config.job_name}")
+            else:
+                # Sync mode: existing behavior
+                result = await job.run()
+                if result.trial_results:
+                    for tr in result.trial_results:
+                        output = getattr(tr, "raw_output", None) or ""
+                        if output:
+                            print(output)
+                logger.info(f"Job completed: status={result.status}")
         except Exception as e:
             logger.error(f"Job failed: {e}")
 
@@ -206,6 +215,33 @@ class JobCommand(Command):
             **cfg_kwargs,
         )
 
+    def _print_async_result(self, config, job_client) -> None:
+        """Print job info and trial details in table format for async mode."""
+        # Header
+        job_name = config.job_name or "N/A"
+        trial_count = len(job_client.trials)
+        trial_word = "trial" if trial_count == 1 else "trials"
+        print(f"Job submitted: {job_name} ({trial_count} {trial_word})")
+
+        # Table header
+        print("sandbox_id   session              pid")
+
+        # Table rows
+        for tc in job_client.trials:
+            sandbox_id = tc.sandbox.sandbox_id[:12] if tc.sandbox.sandbox_id else "N/A"
+            session = tc.session[:20] if tc.session else "N/A"
+            pid = tc.pid if tc.pid else "N/A"
+            print(f"{sandbox_id:<12} {session:<20} {pid:<8}")
+
+        # Metadata section
+        print()
+        experiment_id = config.experiment_id or "N/A"
+        namespace = config.namespace or "N/A"
+        labels = ", ".join(f"{k}={v}" for k, v in config.labels.items()) if config.labels else "N/A"
+        print(f"Experiment: {experiment_id}")
+        print(f"Namespace: {namespace}")
+        print(f"Labels: {labels}")
+
     @staticmethod
     async def add_parser_to(subparsers: argparse._SubParsersAction):
         job_parser = subparsers.add_parser("job", help="Manage sandbox jobs")
@@ -266,6 +302,13 @@ class JobCommand(Command):
             "--xrl-authorization",
             default=None,
             help="XRL authorization token",
+        )
+        run_parser.add_argument(
+            "--async",
+            action="store_true",
+            dest="async_submit",
+            default=False,
+            help="Submit job asynchronously and return immediately without waiting for completion.",
         )
 
         # Stash on the class so _job_run can call parser.error() with the right parser.
