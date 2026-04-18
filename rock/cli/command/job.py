@@ -133,6 +133,8 @@ class JobCommand(Command):
             env.extra_headers = args.extra_headers
         if getattr(args, "xrl_authorization", None):
             env.xrl_authorization = args.xrl_authorization
+        if getattr(args, "user_id", None):
+            env.user_id = args.user_id
 
         for item in args.env or []:
             key, _, value = item.partition("=")
@@ -143,6 +145,12 @@ class JobCommand(Command):
 
         if args.timeout is not None:
             config.timeout = args.timeout
+
+        # Job-level overrides
+        if getattr(args, "experiment_id", None):
+            config.experiment_id = args.experiment_id
+        if getattr(args, "job_name", None):
+            config.job_name = args.job_name
 
     def _config_from_yaml(self, parser: argparse.ArgumentParser, args: argparse.Namespace):
         """Load config via JobConfig.from_yaml and enforce --type consistency."""
@@ -199,10 +207,16 @@ class JobCommand(Command):
             env_kwargs["extra_headers"] = args.extra_headers
         if getattr(args, "xrl_authorization", None):
             env_kwargs["xrl_authorization"] = args.xrl_authorization
+        if getattr(args, "user_id", None):
+            env_kwargs["user_id"] = args.user_id
 
         cfg_kwargs: dict = {}
         if args.timeout is not None:
             cfg_kwargs["timeout"] = args.timeout
+        if getattr(args, "experiment_id", None):
+            cfg_kwargs["experiment_id"] = args.experiment_id
+        if getattr(args, "job_name", None):
+            cfg_kwargs["job_name"] = args.job_name
 
         return BashJobConfig(
             script=args.script_content,
@@ -302,6 +316,21 @@ class JobCommand(Command):
             "--xrl-authorization",
             default=None,
             help="XRL authorization token",
+        )
+        run_parser.add_argument(
+            "--user-id",
+            default=None,
+            help="User ID for the sandbox (maps to environment.user_id)",
+        )
+        run_parser.add_argument(
+            "--experiment-id",
+            default=None,
+            help="Experiment ID for the job (maps to experiment_id)",
+        )
+        run_parser.add_argument(
+            "--job-name",
+            default=None,
+            help="Job name (maps to job_name, defaults to timestamp-based name)",
         )
         run_parser.add_argument(
             "--async",
